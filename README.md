@@ -33,3 +33,5 @@ Then open **http://localhost:5000** in your browser.
 - Live progress bar + log shows what's happening in real time
 - Spotify links automatically switch to spotdl
 - The server only runs locally — nothing is sent anywhere
+- - Made by Claude ai
+  - 
