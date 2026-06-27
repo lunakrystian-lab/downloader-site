@@ -14,8 +14,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 import yt_dlp
 
-# Check if spotdl CLI is available
-SPOTDL_AVAILABLE = shutil.which("spotdl") is not None
+# spotdl is used via CLI subprocess; no Python import needed.
+SPOTDL_AVAILABLE = bool(shutil.which("spotdl"))
 
 # ── Config ────────────────────────────────────────────────────────────────────
 BASE_DIR      = Path(__file__).resolve().parent
@@ -217,7 +217,7 @@ def is_spotify_url(url: str) -> bool:
 # ── Download functions ────────────────────────────────────────────────────────
 
 def run_download_spotdl(job_id, payload):
-    """Download from Spotify using spotdl CLI."""
+    """Download from Spotify using spotdl CLI (matches youtubespotify.py behaviour)."""
     job = jobs[job_id]
     q   = job["queue"]
     tmpdir = job["tmpdir"]
@@ -226,33 +226,24 @@ def run_download_spotdl(job_id, payload):
     try:
         spotdl_bin = shutil.which("spotdl")
         if not spotdl_bin:
-            raise RuntimeError("spotdl is not installed. Run: pip install spotdl")
+            raise RuntimeError("spotdl is not installed or not on PATH. Run: pip install spotdl")
 
         sse(q, "log", {"msg": "Contacting Spotify..."})
 
-        cmd = [
-            spotdl_bin, url,
-            "--output", str(tmpdir),
-            "--format", "mp3",
-            "--log-level", "ERROR",
-            "--overwrite", "force",
-        ]
-
+        cmd = [spotdl_bin, "--output", str(tmpdir), url]
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
         )
-
         for line in proc.stdout:
-            line = line.strip()
+            line = line.rstrip()
             if line:
                 sse(q, "log", {"msg": line})
-
         proc.wait()
         if proc.returncode != 0:
-            raise RuntimeError(f"spotdl exited with code {proc.returncode}")
+            raise RuntimeError(f"spotdl exited with code {proc.returncode}. Check the log above.")
 
         files = list(tmpdir.iterdir())
         if not files:
@@ -280,10 +271,10 @@ def run_download_ytdlp(job_id, payload):
     q = job["queue"]
     tmpdir = job["tmpdir"]
     url = payload.get("url", "").strip()
-    fmt = payload.get("fmt", "best").strip()
+    fmt = payload.get("format", "best").strip()
     start = payload.get("start", "").strip()
     end = payload.get("end", "").strip()
-    custom_name = sanitize_filename(payload.get("fname", "").strip())
+    custom_name = sanitize_filename(payload.get("filename", "").strip())
 
     try:
         # Check for ffmpeg and other dependencies
@@ -293,7 +284,7 @@ def run_download_ytdlp(job_id, payload):
 
         # Build the output filename template
         if custom_name:
-            outtmpl = str(tmpdir / f"{custom_name}.%(ext)s")
+            outtmpl = str(tmpdir / f"{custom_name}")
         else:
             outtmpl = str(tmpdir / "%(title)s.%(ext)s")
 
