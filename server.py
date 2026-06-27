@@ -17,7 +17,7 @@ import yt_dlp
 # spotdl is used via CLI subprocess; no Python import needed.
 SPOTDL_AVAILABLE = bool(shutil.which("spotdl"))
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# ── Config ─────────────────────────────────────────────────────────────────────
 BASE_DIR      = Path(__file__).resolve().parent
 PASSWORD      = os.environ.get("PASSWORD", "changeme")
 SECRET_KEY    = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
@@ -47,7 +47,7 @@ app.config.update(
 # either lock out everyone behind the proxy at once, or never trigger).
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-# ── Brute-force protection ────────────────────────────────────────────────────
+# ── Brute-force protection ─────────────────────────────────────────────────────
 failed_attempts: dict = {}
 failed_attempts_lock = threading.Lock()
 MAX_ATTEMPTS  = 5
@@ -72,7 +72,7 @@ def clear_failures(ip):
     with failed_attempts_lock:
         failed_attempts.pop(ip, None)
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
+# ── Auth ───────────────────────────────────────────────────────────────────────
 def login_required(f):
     """For HTML page routes: bounce an unauthenticated browser to /login."""
     @wraps(f)
@@ -93,7 +93,7 @@ def api_login_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# ── Jobs ──────────────────────────────────────────────────────────────────────
+# ── Jobs ───────────────────────────────────────────────────────────────────────
 jobs: dict = {}
 jobs_lock = threading.Lock()
 
@@ -215,7 +215,6 @@ def is_spotify_url(url: str) -> bool:
     return "spotify.com" in url
 
 # ── Download functions ────────────────────────────────────────────────────────
-
 def run_download_spotdl(job_id, payload):
     """Download from Spotify using spotdl CLI (matches youtubespotify.py behaviour)."""
     job = jobs[job_id]
@@ -268,10 +267,10 @@ def run_download_spotdl(job_id, payload):
 def run_download_ytdlp(job_id, payload):
     """Download from YouTube and other sources using yt-dlp."""
     job = jobs[job_id]
-    q = job["queue"]
+    q   = job["queue"]
     tmpdir = job["tmpdir"]
     url = payload.get("url", "").strip()
-    fmt = payload.get("format", "best").strip()
+    fmt = payload.get("fmt", "best").strip()
     start = payload.get("start", "").strip()
     end = payload.get("end", "").strip()
     custom_name = sanitize_filename(payload.get("filename", "").strip())
@@ -283,11 +282,6 @@ def run_download_ytdlp(job_id, payload):
             sse(q, "log", {"msg": "⚠ ffmpeg not found — some features disabled"})
 
         # Build the output filename template
-        if custom_name:
-            outtmpl = str(tmpdir / f"{custom_name}")
-        else:
-            outtmpl = str(tmpdir / "%(title)s.%(ext)s")
-
         # Determine if downloading audio only
         is_audio_only = fmt == "bestaudio/best"
 
@@ -295,7 +289,6 @@ def run_download_ytdlp(job_id, payload):
             "quiet":               True,
             "no_warnings":         True,
             "no_cache_dir":        True,
-            "outtmpl":             outtmpl,
             "format":              fmt,
             "progress_hooks":      [make_progress_hook(q)],
             "postprocessor_hooks": [make_postprocessor_hook(q)],
@@ -314,9 +307,27 @@ def run_download_ytdlp(job_id, payload):
                     "preferredcodec":   "mp3",
                     "preferredquality": "192",
                 }]
+                # Don't include extension - FFmpegExtractAudio will set .mp3 after conversion
+                if custom_name:
+                    outtmpl = str(tmpdir / custom_name)
+                else:
+                    outtmpl = str(tmpdir / "%(title)s")
             else:
-                sse(q, "log", {"msg": "⚠ ffmpeg not found — audio will be in original format"})
-                opts["format"] = "bestaudio"
+                # No ffmpeg: download best audio-only format directly
+                sse(q, "log", {"msg": "⚠ ffmpeg not found — downloading best audio-only format"})
+                opts["format"] = "bestaudio[ext=m4a]/bestaudio"
+                if custom_name:
+                    outtmpl = str(tmpdir / custom_name)
+                else:
+                    outtmpl = str(tmpdir / "%(title)s.%(ext)s")
+        else:
+            # Video mode: use original extension
+            if custom_name:
+                outtmpl = str(tmpdir / custom_name)
+            else:
+                outtmpl = str(tmpdir / "%(title)s.%(ext)s")
+
+        opts["outtmpl"] = outtmpl
 
         if "+" in fmt:
             if has_ffmpeg:
@@ -371,7 +382,7 @@ def run_download_ytdlp(job_id, payload):
 def run_download(job_id, payload):
     """Route to the appropriate downloader (spotdl or yt-dlp)."""
     url = payload.get("url", "").strip()
-    
+
     if is_spotify_url(url):
         run_download_spotdl(job_id, payload)
     else:
