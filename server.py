@@ -230,7 +230,7 @@ def run_download_spotdl(job_id, payload):
 
         sse(q, "log", {"msg": "Contacting Spotify..."})
 
-        cmd = [spotdl_bin, "--output", str(tmpdir), "--log-level", "DEBUG", url]
+        cmd = [spotdl_bin, "--output", str(tmpdir), "--threads", "1", url]
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -297,9 +297,6 @@ def run_download_ytdlp(job_id, payload):
             "no_cache_dir":        True,
             "outtmpl":             outtmpl,
             "format":              fmt,
-            # Prefer widely-available containers so format selection doesn't
-            # fail when a specific codec/container combination is absent.
-            "format_sort":         ["res", "ext:mp4:m4a:webm:ogg"],
             "progress_hooks":      [make_progress_hook(q)],
             "postprocessor_hooks": [make_postprocessor_hook(q)],
         }
