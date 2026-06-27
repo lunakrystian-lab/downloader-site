@@ -2,7 +2,7 @@
 builder = "nixpacks"
 
 [build.nixpacksPlan.phases.setup]
-nixPkgs = ["ffmpeg"]
+nixPkgs = ["ffmpeg", "nodejs"]
 
 [deploy]
 startCommand = "python server.py"
