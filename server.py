@@ -1,56 +1,51 @@
 #!/usr/bin/env python3
 """
-Multi-Downloader — Local Web Server
-Run:  python server.py
-Open: http://localhost:5000
-
-Env vars:
-  PASSWORD   - login password (required)
-  SECRET_KEY - flask secret key (required, set a long random string)
+Multi-Downloader — Web Server
+Env vars: PASSWORD, SECRET_KEY
 """
 
 import os, sys, json, queue, threading, subprocess, shutil, tempfile, mimetypes, time
 from pathlib import Path
 from functools import wraps
+from urllib.parse import quote
 from flask import (Flask, request, Response, jsonify,
-                   send_from_directory, send_file, session, redirect, url_for)
+                   send_from_directory, session, redirect, url_for)
 from werkzeug.security import generate_password_hash, check_password_hash
 import yt_dlp
 
-# ── Config ───────────────────────────────────────────────────────────────────
-PASSWORD     = os.environ.get("PASSWORD", "changeme")
-SECRET_KEY   = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
-COOKIES_PATH = Path("/app/cookies.txt")  # where uploaded cookies live
-
+# ── Config ────────────────────────────────────────────────────────────────────
+PASSWORD      = os.environ.get("PASSWORD", "changeme")
+SECRET_KEY    = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
+COOKIES_PATH  = Path("/app/cookies.txt")
 PASSWORD_HASH = generate_password_hash(PASSWORD)
 
 app = Flask(__name__, static_folder="static")
 app.secret_key = SECRET_KEY
 app.config.update(
-    SESSION_COOKIE_SECURE   = True,   # HTTPS only
-    SESSION_COOKIE_HTTPONLY = True,   # no JS access
-    SESSION_COOKIE_SAMESITE = "Lax",  # CSRF protection
-    PERMANENT_SESSION_LIFETIME = 60 * 60 * 12,  # 12 hour session
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    PERMANENT_SESSION_LIFETIME=60 * 60 * 12,
 )
 
 # ── Brute-force protection ────────────────────────────────────────────────────
-failed_attempts: dict[str, list] = {}  # ip -> [timestamps]
+failed_attempts: dict = {}
 MAX_ATTEMPTS  = 5
-LOCKOUT_SECS  = 60 * 15  # 15 minutes
+LOCKOUT_SECS  = 60 * 15
 
-def is_locked_out(ip: str) -> bool:
+def is_locked_out(ip):
     now = time.time()
     attempts = [t for t in failed_attempts.get(ip, []) if now - t < LOCKOUT_SECS]
     failed_attempts[ip] = attempts
     return len(attempts) >= MAX_ATTEMPTS
 
-def record_failure(ip: str):
+def record_failure(ip):
     failed_attempts.setdefault(ip, []).append(time.time())
 
-def clear_failures(ip: str):
+def clear_failures(ip):
     failed_attempts.pop(ip, None)
 
-# ── Auth decorator ────────────────────────────────────────────────────────────
+# ── Auth ──────────────────────────────────────────────────────────────────────
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -59,16 +54,17 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated
 
-# ── Jobs store ────────────────────────────────────────────────────────────────
-jobs: dict[str, dict] = {}
+# ── Jobs ──────────────────────────────────────────────────────────────────────
+jobs: dict = {}
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-def sse(q: queue.Queue, event: str, data: dict):
-    q.put(f"event: {event}\ndata: {json.dumps(data)}\n\n")
+def sse(q, event, data):
+    q.put("event: {}\ndata: {}\n\n".format(event, json.dumps(data)))
 
-def parse_time(value: str) -> float:
+def parse_time(value):
     value = value.strip()
-    if not value: return 0.0
+    if not value:
+        return 0.0
     parts = value.split(":")
     try:
         parts = [float(p) for p in parts]
@@ -79,7 +75,7 @@ def parse_time(value: str) -> float:
     if len(parts) == 3: return parts[0] * 3600 + parts[1] * 60 + parts[2]
     return 0.0
 
-def make_progress_hook(q: queue.Queue):
+def make_progress_hook(q):
     def hook(d):
         status = d.get("status")
         if status == "downloading":
@@ -89,11 +85,18 @@ def make_progress_hook(q: queue.Queue):
                 "eta":   d.get("_eta_str",     "").strip(),
             })
         elif status == "finished":
-            sse(q, "progress", {"pct": "100%", "speed": "", "eta": "finishing…"})
+            sse(q, "progress", {"pct": "100%", "speed": "", "eta": "finishing..."})
     return hook
 
+def safe_disposition(filename):
+    ascii_name = filename.encode("ascii", "ignore").decode("ascii").strip()
+    if not ascii_name:
+        ascii_name = "download"
+    encoded = quote(filename, safe="")
+    return "attachment; filename=\"{}\"; filename*=UTF-8''{}".format(ascii_name, encoded)
+
 # ── Download worker ───────────────────────────────────────────────────────────
-def run_download(job_id: str, payload: dict):
+def run_download(job_id, payload):
     job = jobs[job_id]
     q   = job["queue"]
     url        = payload["url"]
@@ -108,13 +111,7 @@ def run_download(job_id: str, payload: dict):
 
     try:
         if is_spot:
-            if not shutil.which("spotdl"):
-                sse(q, "log", {"msg": "📦 Installing spotdl…"})
-                subprocess.check_call(
-                    [sys.executable, "-m", "pip", "install", "--quiet", "spotdl"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-            sse(q, "log", {"msg": "🎵 Starting Spotify download…"})
+            sse(q, "log", {"msg": "Spotify download starting..."})
             proc = subprocess.Popen(
                 [sys.executable, "-m", "spotdl", url, "--output", str(tmpdir)],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
@@ -136,7 +133,7 @@ def run_download(job_id: str, payload: dict):
             return
 
         # ── yt-dlp ──────────────────────────────────────────────────────────
-        outtmpl       = str(tmpdir / (f"{fname}.%(ext)s" if fname else "%(title)s.%(ext)s"))
+        outtmpl       = str(tmpdir / ("{}.%(ext)s".format(fname) if fname else "%(title)s.%(ext)s"))
         is_audio_only = fmt == "bestaudio/best"
 
         opts = {
@@ -148,12 +145,11 @@ def run_download(job_id: str, payload: dict):
             "progress_hooks": [make_progress_hook(q)],
         }
 
-        # attach cookies if uploaded
         if COOKIES_PATH.exists():
             opts["cookiefile"] = str(COOKIES_PATH)
-            sse(q, "log", {"msg": "🍪 Using cookies"})
+            sse(q, "log", {"msg": "Using cookies"})
         else:
-            sse(q, "log", {"msg": "⚠️  No cookies file found — may hit bot detection"})
+            sse(q, "log", {"msg": "No cookies — may hit bot detection"})
 
         if is_audio_only:
             if has_ffmpeg:
@@ -163,14 +159,14 @@ def run_download(job_id: str, payload: dict):
                     "preferredquality": "192",
                 }]
             else:
-                sse(q, "log", {"msg": "⚠️  ffmpeg not found — downloading best available audio (may not be mp3)"})
+                sse(q, "log", {"msg": "ffmpeg not found — audio will be in original format"})
                 opts["format"] = "bestaudio"
 
         if "+" in fmt:
             if has_ffmpeg:
                 opts["merge_output_format"] = "mp4"
             else:
-                sse(q, "log", {"msg": "⚠️  ffmpeg not found — falling back to pre-merged stream."})
+                sse(q, "log", {"msg": "ffmpeg not found — falling back to pre-merged stream"})
                 opts["format"] = "best"
 
         if (start or end) and has_ffmpeg:
@@ -184,14 +180,14 @@ def run_download(job_id: str, payload: dict):
             opts["download_ranges"]         = _ranges
             opts["force_keyframes_at_cuts"] = True
         elif (start or end) and not has_ffmpeg:
-            sse(q, "log", {"msg": "⚠️  Time trimming skipped — ffmpeg required."})
+            sse(q, "log", {"msg": "Time trimming skipped — ffmpeg required"})
 
-        sse(q, "log", {"msg": "⏳ Contacting servers…"})
+        sse(q, "log", {"msg": "Contacting servers..."})
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.cache.remove()
             info  = ydl.extract_info(url, download=False)
             title = info.get("title", "download")
-            sse(q, "log", {"msg": f"📄 {title}"})
+            sse(q, "log", {"msg": title})
             ydl.download([url])
 
         files = list(tmpdir.iterdir())
@@ -204,7 +200,7 @@ def run_download(job_id: str, payload: dict):
 
     except Exception as exc:
         job["error"] = str(exc)
-        sse(q, "error", {"msg": f"❌ {exc}"})
+        sse(q, "error", {"msg": "ERROR: {}".format(exc)})
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     finally:
@@ -222,10 +218,8 @@ def login():
     ip = request.remote_addr
     if is_locked_out(ip):
         return jsonify({"error": "Too many failed attempts. Try again in 15 minutes."}), 429
-
     data     = request.get_json(force=True)
     password = data.get("password", "")
-
     if check_password_hash(PASSWORD_HASH, password):
         clear_failures(ip)
         session.clear()
@@ -235,7 +229,7 @@ def login():
     else:
         record_failure(ip)
         remaining = MAX_ATTEMPTS - len(failed_attempts.get(ip, []))
-        return jsonify({"error": f"Wrong password. {remaining} attempts left."}), 401
+        return jsonify({"error": "Wrong password. {} attempts left.".format(remaining)}), 401
 
 @app.route("/logout")
 def logout():
@@ -281,14 +275,12 @@ def stream(job_id):
     if not job:
         return Response("job not found", status=404)
     q = job["queue"]
-
     def generate():
         while True:
             item = q.get()
             if item is None:
                 break
             yield item
-
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -298,15 +290,16 @@ def download(job_id):
     job = jobs.get(job_id)
     if not job or not job["file"]:
         return Response("File not ready", status=404)
-
     filepath = job["file"]
     filename = job["filename"]
     mime     = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-
     def stream_and_cleanup():
         try:
             with open(filepath, "rb") as f:
-                while chunk := f.read(65536):
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
                     yield chunk
         finally:
             try:
@@ -315,18 +308,11 @@ def download(job_id):
             except Exception:
                 pass
             jobs.pop(job_id, None)
-
-    # RFC 5987 — safe encoding for unicode filenames in HTTP headers
-    from urllib.parse import quote as urlquote
-    ascii_fallback = filename.encode('ascii', 'ignore').decode('ascii').strip() or 'download'
-    encoded = urlquote(filename, safe='')
-    disposition = f"attachment; filename="{ascii_fallback}"; filename*=UTF-8''{encoded}"
-
     return Response(
         stream_and_cleanup(),
         mimetype=mime,
         headers={
-            "Content-Disposition": disposition,
+            "Content-Disposition": safe_disposition(filename),
             "Content-Length": str(os.path.getsize(filepath)),
         }
     )
@@ -334,9 +320,8 @@ def download(job_id):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     print("=" * 50)
-    print("  Multi-Downloader  —  Local Server")
-    print("=" * 50)
-    print(f"  Open: http://localhost:{port}")
-    print(f"  Password env var: {'SET' if os.environ.get('PASSWORD') else 'NOT SET (using default)'}")
+    print("  Multi-Downloader")
+    print("  Open: http://localhost:{}".format(port))
+    print("  Password: {}".format("SET" if os.environ.get("PASSWORD") else "NOT SET"))
     print("=" * 50)
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
