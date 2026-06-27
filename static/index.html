@@ -431,6 +431,10 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
+      if (res.status === 401) {
+        window.location.href = '/login';
+        return;
+      }
       const data = await res.json();
       jobId = data.job_id;
     } catch (e) {
@@ -499,10 +503,7 @@
       dlBtn.disabled = false;
     });
   }
-</script>
-</body>
-</html>
-<script>
+
   // ── Cookie upload ──
   const cookieFile      = document.getElementById('cookieFile');
   const cookieUploadBtn = document.getElementById('cookieUploadBtn');
@@ -554,3 +555,5 @@
     cookieFile.value = '';
   });
 </script>
+</body>
+</html>
