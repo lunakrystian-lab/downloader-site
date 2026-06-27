@@ -116,7 +116,7 @@ def run_download(job_id: str, payload: dict):
                 )
             sse(q, "log", {"msg": "🎵 Starting Spotify download…"})
             proc = subprocess.Popen(
-                ["spotdl", url, "--output", str(tmpdir)],
+                [sys.executable, "-m", "spotdl", url, "--output", str(tmpdir)],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
             )
             for line in proc.stdout:
@@ -163,7 +163,8 @@ def run_download(job_id: str, payload: dict):
                     "preferredquality": "192",
                 }]
             else:
-                sse(q, "log", {"msg": "⚠️  ffmpeg not found — can't convert to MP3."})
+                sse(q, "log", {"msg": "⚠️  ffmpeg not found — downloading best available audio (may not be mp3)"})
+                opts["format"] = "bestaudio"
 
         if "+" in fmt:
             if has_ffmpeg:
@@ -315,11 +316,17 @@ def download(job_id):
                 pass
             jobs.pop(job_id, None)
 
+    # RFC 5987 — safe encoding for unicode filenames in HTTP headers
+    from urllib.parse import quote as urlquote
+    ascii_fallback = filename.encode('ascii', 'ignore').decode('ascii').strip() or 'download'
+    encoded = urlquote(filename, safe='')
+    disposition = f"attachment; filename="{ascii_fallback}"; filename*=UTF-8''{encoded}"
+
     return Response(
         stream_and_cleanup(),
         mimetype=mime,
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Disposition": disposition,
             "Content-Length": str(os.path.getsize(filepath)),
         }
     )
