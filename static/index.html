@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multi-Downloader</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg:       #0d0f14;
+      --surface:  #151821;
+      --surface2: #1c2030;
+      --border:   #252a3a;
+      --accent:   #7c6af7;
+      --accent2:  #5bf0a0;
+      --danger:   #f76a6a;
+      --warn:     #f0b45b;
+      --text:     #e2e6f0;
+      --muted:    #6b7491;
+      --mono:     'JetBrains Mono', monospace;
+      --sans:     'Inter', sans-serif;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    header {
+      width: 100%;
+      padding: 28px 24px 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+    }
+    .logo-row { display: flex; align-items: center; gap: 12px; }
+    .logo-icon {
+      width: 42px; height: 42px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border-radius: 12px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px;
+    }
+    h1 { font-family: var(--mono); font-size: 1.45rem; font-weight: 700; }
+    .version-tag {
+      font-family: var(--mono); font-size: 0.68rem;
+      color: var(--accent2); border: 1px solid var(--accent2);
+      border-radius: 4px; padding: 1px 6px; margin-left: 4px;
+    }
+    .subtitle { font-size: 0.82rem; color: var(--muted); font-family: var(--mono); }
+
+    main {
+      width: 100%; max-width: 640px;
+      padding: 28px 16px 60px;
+      display: flex; flex-direction: column; gap: 18px;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 22px 20px;
+    }
+    .card-label {
+      font-family: var(--mono); font-size: 0.68rem; font-weight: 600;
+      color: var(--muted); letter-spacing: 0.08em;
+      text-transform: uppercase; margin-bottom: 10px;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 9px; color: var(--text);
+      font-family: var(--mono); font-size: 0.85rem;
+      padding: 11px 14px; outline: none;
+      transition: border-color 0.15s;
+    }
+    input[type="text"]:focus { border-color: var(--accent); }
+    input[type="text"]::placeholder { color: var(--muted); }
+
+    .detect-badge {
+      display: none; align-items: center; gap: 6px;
+      margin-top: 8px; font-family: var(--mono); font-size: 0.74rem;
+    }
+    .detect-badge .dot { width: 7px; height: 7px; border-radius: 50%; }
+    .detect-badge.spotify { color: #1db954; display: flex; }
+    .detect-badge.spotify .dot { background: #1db954; }
+    .detect-badge.youtube { color: #ff5555; display: flex; }
+    .detect-badge.youtube .dot { background: #ff5555; }
+
+    .option-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+    .radio-btn { position: relative; cursor: pointer; }
+    .radio-btn input { position: absolute; opacity: 0; width: 0; height: 0; }
+    .radio-face {
+      display: flex; flex-direction: column; align-items: center;
+      gap: 5px; padding: 12px 8px;
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 10px; text-align: center;
+      transition: border-color 0.15s, background 0.15s; cursor: pointer;
+    }
+    .radio-btn input:checked + .radio-face {
+      border-color: var(--accent); background: rgba(124,106,247,0.1);
+    }
+    .radio-face .icon { font-size: 1.2rem; }
+    .radio-face .label { font-size: 0.72rem; font-weight: 600; color: var(--text); }
+    .radio-face .sublabel { font-family: var(--mono); font-size: 0.62rem; color: var(--muted); }
+
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .field label {
+      display: block; font-family: var(--mono); font-size: 0.68rem;
+      color: var(--muted); margin-bottom: 5px;
+      text-transform: uppercase; letter-spacing: 0.06em;
+    }
+
+    .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .toggle-info .tl { font-size: 0.88rem; font-weight: 500; }
+    .toggle-info .ts { font-size: 0.74rem; color: var(--muted); margin-top: 2px; }
+    .toggle { position: relative; width: 42px; height: 24px; flex-shrink: 0; }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle-track {
+      position: absolute; inset: 0;
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 999px; cursor: pointer;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    .toggle input:checked + .toggle-track { background: var(--accent); border-color: var(--accent); }
+    .toggle-track::after {
+      content: ''; position: absolute;
+      top: 3px; left: 3px; width: 16px; height: 16px;
+      background: var(--text); border-radius: 50%; transition: transform 0.2s;
+    }
+    .toggle input:checked + .toggle-track::after { transform: translateX(18px); }
+
+    .advanced-wrap { overflow: hidden; max-height: 0; transition: max-height 0.3s ease, opacity 0.3s; opacity: 0; }
+    .advanced-wrap.open { max-height: 400px; opacity: 1; }
+    .advanced-inner {
+      padding-top: 18px; display: flex; flex-direction: column; gap: 14px;
+      border-top: 1px solid var(--border); margin-top: 18px;
+    }
+
+    .dl-btn {
+      width: 100%; padding: 14px;
+      background: var(--accent); color: #fff;
+      font-family: var(--mono); font-size: 0.9rem; font-weight: 700;
+      border: none; border-radius: 10px; cursor: pointer;
+      letter-spacing: 0.04em; transition: opacity 0.15s, transform 0.1s;
+    }
+    .dl-btn:hover:not(:disabled) { opacity: 0.88; }
+    .dl-btn:active:not(:disabled) { transform: scale(0.98); }
+    .dl-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ── Progress card ── */
+    .progress-card { display: none; }
+    .progress-card.visible { display: block; }
+
+    .prog-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .prog-title { font-size: 0.88rem; font-weight: 600; }
+    .prog-pct { font-family: var(--mono); font-size: 0.8rem; color: var(--accent2); }
+
+    .prog-bar-wrap {
+      height: 6px; background: var(--surface2);
+      border-radius: 999px; overflow: hidden; margin-bottom: 10px;
+    }
+    .prog-bar {
+      height: 100%; width: 0%;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+      border-radius: 999px; transition: width 0.4s ease;
+    }
+    .prog-bar.indeterminate {
+      width: 40%; animation: slide 1.2s infinite linear;
+    }
+    @keyframes slide {
+      0%   { transform: translateX(-100%); }
+      100% { transform: translateX(350%); }
+    }
+
+    .prog-meta {
+      display: flex; gap: 16px;
+      font-family: var(--mono); font-size: 0.72rem; color: var(--muted);
+    }
+
+    .log-box {
+      margin-top: 14px;
+      background: #0a0c12;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-family: var(--mono); font-size: 0.76rem;
+      color: var(--muted);
+      max-height: 160px;
+      overflow-y: auto;
+      display: flex; flex-direction: column; gap: 3px;
+    }
+    .log-line { line-height: 1.5; }
+    .log-line.done  { color: var(--accent2); }
+    .log-line.error { color: var(--danger); }
+    .log-line.warn  { color: var(--warn); }
+
+    .spotify-only { display: none; }
+    .yt-only { display: block; }
+    body.spotify-mode .spotify-only { display: block; }
+    body.spotify-mode .yt-only { display: none; }
+
+    footer {
+      margin-top: auto; padding: 16px;
+      font-family: var(--mono); font-size: 0.68rem;
+      color: var(--muted); text-align: center;
+    }
+
+    @media (max-width: 480px) {
+      .option-grid { grid-template-columns: 1fr 1fr; }
+      h1 { font-size: 1.15rem; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo-row">
+    <div class="logo-icon">⬇</div>
+    <h1>Multi-Downloader <span class="version-tag">v2.1</span></h1>
+  </div>
+  <p class="subtitle">YouTube · Spotify · Any site yt-dlp supports</p>
+</header>
+
+<main>
+
+  <!-- URL -->
+  <div class="card">
+    <div class="card-label">Paste URL</div>
+    <input type="text" id="urlInput" placeholder="https://youtube.com/watch?v=…" />
+    <div class="detect-badge" id="detectBadge">
+      <span class="dot"></span><span id="detectText"></span>
+    </div>
+  </div>
+
+  <!-- Format (YouTube) -->
+  <div class="card yt-only">
+    <div class="card-label">Format</div>
+    <div class="option-grid">
+      <label class="radio-btn">
+        <input type="radio" name="fmt" value="best" checked />
+        <div class="radio-face">
+          <span class="icon">⚡</span>
+          <span class="label">Fast Stream</span>
+          <span class="sublabel">No ffmpeg</span>
+        </div>
+      </label>
+      <label class="radio-btn">
+        <input type="radio" name="fmt" value="bestvideo+bestaudio/best" />
+        <div class="radio-face">
+          <span class="icon">🎬</span>
+          <span class="label">Best Video</span>
+          <span class="sublabel">Needs ffmpeg</span>
+        </div>
+      </label>
+      <label class="radio-btn">
+        <input type="radio" name="fmt" value="bestaudio/best" />
+        <div class="radio-face">
+          <span class="icon">🎵</span>
+          <span class="label">Audio Only</span>
+          <span class="sublabel">MP3 / M4A</span>
+        </div>
+      </label>
+    </div>
+  </div>
+
+  <!-- Advanced -->
+  <div class="card yt-only">
+    <div class="toggle-row">
+      <div class="toggle-info">
+        <div class="tl">Advanced options</div>
+        <div class="ts">Custom filename · time trim</div>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="advToggle" />
+        <span class="toggle-track"></span>
+      </label>
+    </div>
+    <div class="advanced-wrap" id="advWrap">
+      <div class="advanced-inner">
+        <div class="field">
+          <label>Custom filename (leave blank for auto)</label>
+          <input type="text" id="fname" placeholder="my-video" />
+        </div>
+        <div class="row2">
+          <div class="field">
+            <label>Start trim</label>
+            <input type="text" id="startTime" placeholder="1:20 or 80" />
+          </div>
+          <div class="field">
+            <label>End trim</label>
+            <input type="text" id="endTime" placeholder="2:30 or 150" />
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Spotify note -->
+  <div class="card spotify-only">
+    <div class="card-label">Spotify mode</div>
+    <p style="font-size:0.82rem;color:var(--muted);line-height:1.6;">
+      Spotify links are handled by <strong style="color:var(--text)">spotdl</strong>.
+      Tracks, albums, and playlists all work — saved as MP3s.
+    </p>
+  </div>
+
+  <button class="dl-btn" id="dlBtn">Download ↓</button>
+
+  <!-- Progress -->
+  <div class="card progress-card" id="progCard">
+    <div class="prog-header">
+      <span class="prog-title" id="progTitle">Downloading…</span>
+      <span class="prog-pct" id="progPct"></span>
+    </div>
+    <div class="prog-bar-wrap">
+      <div class="prog-bar indeterminate" id="progBar"></div>
+    </div>
+    <div class="prog-meta">
+      <span id="progSpeed"></span>
+      <span id="progEta"></span>
+    </div>
+    <div class="log-box" id="logBox"></div>
+  </div>
+
+</main>
+
+<footer>Downloads go to your ~/Downloads folder · Nothing leaves your machine</footer>
+
+<script>
+  const urlInput    = document.getElementById('urlInput');
+  const detectBadge = document.getElementById('detectBadge');
+  const detectText  = document.getElementById('detectText');
+  const advToggle   = document.getElementById('advToggle');
+  const advWrap     = document.getElementById('advWrap');
+  const dlBtn       = document.getElementById('dlBtn');
+  const progCard    = document.getElementById('progCard');
+  const progTitle   = document.getElementById('progTitle');
+  const progPct     = document.getElementById('progPct');
+  const progBar     = document.getElementById('progBar');
+  const progSpeed   = document.getElementById('progSpeed');
+  const progEta     = document.getElementById('progEta');
+  const logBox      = document.getElementById('logBox');
+
+  // ── URL detection ──
+  urlInput.addEventListener('input', () => {
+    const v = urlInput.value.trim();
+    detectBadge.className = 'detect-badge';
+    if (!v) return;
+    if (v.includes('spotify.com')) {
+      detectBadge.classList.add('spotify');
+      detectText.textContent = 'Spotify detected → spotdl';
+      document.body.classList.add('spotify-mode');
+    } else if (v.startsWith('http')) {
+      detectBadge.classList.add('youtube');
+      detectText.textContent = v.includes('youtu') ? 'YouTube detected → yt-dlp' : 'URL detected → yt-dlp';
+      document.body.classList.remove('spotify-mode');
+    } else {
+      document.body.classList.remove('spotify-mode');
+    }
+  });
+
+  advToggle.addEventListener('change', () => advWrap.classList.toggle('open', advToggle.checked));
+
+  // ── Download ──
+  dlBtn.addEventListener('click', startDownload);
+  urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') startDownload(); });
+
+  function log(msg, cls = '') {
+    const line = document.createElement('div');
+    line.className = 'log-line' + (cls ? ' ' + cls : '');
+    line.textContent = msg;
+    logBox.appendChild(line);
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  async function startDownload() {
+    const url = urlInput.value.trim();
+    if (!url) {
+      urlInput.focus();
+      urlInput.style.borderColor = 'var(--danger)';
+      setTimeout(() => urlInput.style.borderColor = '', 1200);
+      return;
+    }
+
+    // Reset UI
+    dlBtn.disabled = true;
+    logBox.innerHTML = '';
+    progBar.className = 'prog-bar indeterminate';
+    progBar.style.width = '0%';
+    progPct.textContent = '';
+    progSpeed.textContent = '';
+    progEta.textContent = '';
+    progTitle.textContent = 'Starting…';
+    progCard.classList.add('visible');
+    progCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+    const payload = {
+      url,
+      fmt:   document.querySelector('input[name="fmt"]:checked')?.value || 'best',
+      fname: document.getElementById('fname').value.trim(),
+      start: document.getElementById('startTime').value.trim(),
+      end:   document.getElementById('endTime').value.trim(),
+    };
+
+    let jobId;
+    try {
+      const res = await fetch('/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      jobId = data.job_id;
+    } catch (e) {
+      log('❌ Could not reach server. Is server.py running?', 'error');
+      dlBtn.disabled = false;
+      return;
+    }
+
+    // SSE stream
+    const es = new EventSource(`/stream/${jobId}`);
+
+    es.addEventListener('log', e => {
+      const d = JSON.parse(e.data);
+      const msg = d.msg || '';
+      progTitle.textContent = msg.startsWith('📄') ? msg.slice(3) : 'Downloading…';
+      const cls = msg.startsWith('⚠') ? 'warn' : msg.startsWith('❌') ? 'error' : '';
+      log(msg, cls);
+    });
+
+    es.addEventListener('progress', e => {
+      const d = JSON.parse(e.data);
+      const pct = parseFloat(d.pct) || 0;
+      progBar.className = 'prog-bar';
+      progBar.style.width = pct + '%';
+      progPct.textContent = d.pct;
+      if (d.speed) progSpeed.textContent = '⚡ ' + d.speed;
+      if (d.eta)   progEta.textContent   = '⏱ ' + d.eta;
+    });
+
+    es.addEventListener('done', e => {
+      const d = JSON.parse(e.data);
+      progBar.className = 'prog-bar';
+      progBar.style.width = '100%';
+      progPct.textContent = '100%';
+      progTitle.textContent = 'Saving to Downloads…';
+      progSpeed.textContent = '';
+      progEta.textContent = '';
+      log(`✅ ${d.filename} — downloading to your browser now…`, 'done');
+      es.close();
+
+      // Trigger auto-download — browser saves straight to Downloads, no dialog
+      const a = document.createElement('a');
+      a.href = `/download/${d.job_id}`;
+      a.download = d.filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+
+      setTimeout(() => {
+        progTitle.textContent = 'Done!';
+        dlBtn.disabled = false;
+      }, 1500);
+    });
+
+    es.addEventListener('error', e => {
+      try {
+        const d = JSON.parse(e.data);
+        log(d.msg || '❌ Unknown error', 'error');
+      } catch {
+        log('❌ Connection lost.', 'error');
+      }
+      progBar.className = 'prog-bar';
+      progBar.style.background = 'var(--danger)';
+      progTitle.textContent = 'Failed';
+      es.close();
+      dlBtn.disabled = false;
+    });
+  }
+</script>
+</body>
+</html>
