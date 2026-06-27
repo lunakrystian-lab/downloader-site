@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Login — Multi-Downloader</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0d0f14; --surface: #151821; --border: #252a3a;
+      --accent: #7c6af7; --accent2: #5bf0a0; --danger: #f76a6a;
+      --text: #e2e6f0; --muted: #6b7491;
+      --mono: 'JetBrains Mono', monospace; --sans: 'Inter', sans-serif;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg); color: var(--text); font-family: var(--sans);
+      min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    }
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 16px; padding: 36px 32px; width: 100%; max-width: 380px;
+      display: flex; flex-direction: column; gap: 20px;
+    }
+    .logo-row { display: flex; align-items: center; gap: 12px; }
+    .logo-icon {
+      width: 40px; height: 40px;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      border-radius: 10px; display: flex; align-items: center; justify-content: center;
+      font-size: 18px;
+    }
+    h1 { font-family: var(--mono); font-size: 1.2rem; font-weight: 700; }
+    .subtitle { font-size: 0.8rem; color: var(--muted); font-family: var(--mono); }
+    label {
+      display: block; font-family: var(--mono); font-size: 0.68rem;
+      color: var(--muted); margin-bottom: 6px;
+      text-transform: uppercase; letter-spacing: 0.06em;
+    }
+    input[type="password"] {
+      width: 100%; background: #1c2030; border: 1px solid var(--border);
+      border-radius: 9px; color: var(--text); font-family: var(--mono);
+      font-size: 0.9rem; padding: 12px 14px; outline: none;
+      transition: border-color 0.15s;
+    }
+    input[type="password"]:focus { border-color: var(--accent); }
+    .btn {
+      width: 100%; padding: 13px; background: var(--accent); color: #fff;
+      font-family: var(--mono); font-size: 0.88rem; font-weight: 700;
+      border: none; border-radius: 9px; cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .btn:hover:not(:disabled) { opacity: 0.88; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .error {
+      display: none; background: rgba(247,106,106,0.1);
+      border: 1px solid var(--danger); border-radius: 8px;
+      padding: 10px 14px; font-family: var(--mono); font-size: 0.76rem;
+      color: var(--danger);
+    }
+    .error.visible { display: block; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <div class="logo-row">
+    <div class="logo-icon">⬇</div>
+    <div>
+      <h1>Multi-Downloader</h1>
+      <div class="subtitle">Enter password to continue</div>
+    </div>
+  </div>
+  <div>
+    <label>Password</label>
+    <input type="password" id="pw" placeholder="••••••••" autofocus />
+  </div>
+  <div class="error" id="err"></div>
+  <button class="btn" id="btn">Login →</button>
+</div>
+<script>
+  const pw  = document.getElementById('pw');
+  const btn = document.getElementById('btn');
+  const err = document.getElementById('err');
+
+  async function login() {
+    btn.disabled = true;
+    err.classList.remove('visible');
+    try {
+      const res  = await fetch('/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw.value }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        window.location.href = '/';
+      } else {
+        err.textContent = data.error || 'Wrong password.';
+        err.classList.add('visible');
+        pw.value = '';
+        pw.focus();
+      }
+    } catch {
+      err.textContent = 'Could not reach server.';
+      err.classList.add('visible');
+    }
+    btn.disabled = false;
+  }
+
+  btn.addEventListener('click', login);
+  pw.addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+</script>
+</body>
+</html>

@@ -231,6 +231,7 @@
     <h1>Multi-Downloader <span class="version-tag">v2.1</span></h1>
   </div>
   <p class="subtitle">YouTube · Spotify · Any site yt-dlp supports</p>
+  <a href="/logout" style="font-family:var(--mono);font-size:0.7rem;color:var(--muted);text-decoration:none;margin-top:4px;opacity:0.7;">logout</a>
 </header>
 
 <main>
@@ -332,6 +333,15 @@
       <span id="progEta"></span>
     </div>
     <div class="log-box" id="logBox"></div>
+  </div>
+
+  <!-- Cookie upload card -->
+  <div class="card" id="cookieCard">
+    <div class="card-label">YouTube Cookies <span id="cookieStatus" style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">— checking…</span></div>
+    <p style="font-size:0.78rem;color:var(--muted);line-height:1.6;margin-bottom:12px;">Upload your <code style="font-family:var(--mono);color:var(--accent2)">cookies.txt</code> from YouTube to bypass bot detection. Export it using the <strong style="color:var(--text)">Get cookies.txt LOCALLY</strong> Chrome extension while logged into YouTube.</p>
+    <input type="file" id="cookieFile" accept=".txt" style="display:none" />
+    <button class="dl-btn" id="cookieUploadBtn" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:0.8rem;">Upload cookies.txt</button>
+    <div id="cookieMsg" style="margin-top:8px;font-family:var(--mono);font-size:0.74rem;display:none;"></div>
   </div>
 
 </main>
@@ -492,3 +502,55 @@
 </script>
 </body>
 </html>
+<script>
+  // ── Cookie upload ──
+  const cookieFile      = document.getElementById('cookieFile');
+  const cookieUploadBtn = document.getElementById('cookieUploadBtn');
+  const cookieMsg       = document.getElementById('cookieMsg');
+  const cookieStatus    = document.getElementById('cookieStatus');
+
+  async function checkCookieStatus() {
+    try {
+      const res  = await fetch('/cookies-status');
+      const data = await res.json();
+      if (data.exists) {
+        cookieStatus.textContent = '— ✅ cookies loaded';
+        cookieStatus.style.color = 'var(--accent2)';
+      } else {
+        cookieStatus.textContent = '— ⚠️ no cookies yet';
+        cookieStatus.style.color = 'var(--warn)';
+      }
+    } catch {}
+  }
+  checkCookieStatus();
+
+  cookieUploadBtn.addEventListener('click', () => cookieFile.click());
+  cookieFile.addEventListener('change', async () => {
+    const file = cookieFile.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append('cookies', file);
+    cookieUploadBtn.disabled    = true;
+    cookieUploadBtn.textContent = 'Uploading…';
+    try {
+      const res  = await fetch('/upload-cookies', { method: 'POST', body: fd });
+      const data = await res.json();
+      cookieMsg.style.display = 'block';
+      if (data.ok) {
+        cookieMsg.style.color = 'var(--accent2)';
+        cookieMsg.textContent = '✅ ' + data.msg;
+        checkCookieStatus();
+      } else {
+        cookieMsg.style.color = 'var(--danger)';
+        cookieMsg.textContent = '❌ ' + data.error;
+      }
+    } catch {
+      cookieMsg.style.color   = 'var(--danger)';
+      cookieMsg.textContent   = '❌ Upload failed.';
+      cookieMsg.style.display = 'block';
+    }
+    cookieUploadBtn.disabled    = false;
+    cookieUploadBtn.textContent = 'Upload cookies.txt';
+    cookieFile.value = '';
+  });
+</script>
