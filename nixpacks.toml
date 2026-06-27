@@ -1,0 +1,5 @@
+[phases.setup]
+nixPkgs = ["...", "ffmpeg", "deno"]
+
+[start]
+cmd = "python server.py"
