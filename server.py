@@ -16,11 +16,14 @@ import yt_dlp
 
 # Try to import spotdl
 try:
-    from spotdl.downloader.downloader import Downloader
-    from spotdl.types.song import Song
+    from spotdl import Spotdl
     SPOTDL_AVAILABLE = True
 except ImportError:
     SPOTDL_AVAILABLE = False
+
+# Default Spotify API credentials bundled with spotdl (same ones the CLI uses)
+SPOTDL_CLIENT_ID     = "5f573c9620494bae87890c0f08a60293"
+SPOTDL_CLIENT_SECRET = "212476d9b0f3472eaa762d90b19b0ba8"
 
 # ── Config ────────────────────────────────────────────────────────────────────
 BASE_DIR      = Path(__file__).resolve().parent
@@ -224,46 +227,46 @@ def is_spotify_url(url: str) -> bool:
 def run_download_spotdl(job_id, payload):
     """Download from Spotify using spotdl."""
     job = jobs[job_id]
-    q = job["queue"]
+    q   = job["queue"]
     tmpdir = job["tmpdir"]
     url = payload.get("url", "").strip()
 
     try:
         if not SPOTDL_AVAILABLE:
-            raise RuntimeError("spotdl is not installed. Install it with: pip install spotdl")
+            raise RuntimeError("spotdl is not installed. Run: pip install spotdl")
 
         sse(q, "log", {"msg": "Contacting Spotify..."})
 
-        # Create spotdl downloader instance
-        # Use the temp directory as output path
-        downloader = Downloader(
-            output=str(tmpdir),
-            format="mp3",
+        spotdl = Spotdl(
+            client_id=SPOTDL_CLIENT_ID,
+            client_secret=SPOTDL_CLIENT_SECRET,
+            headless=True,
+            no_cache=True,
+            downloader_settings={
+                "output":    str(tmpdir),
+                "format":    "mp3",
+                "log_level": "ERROR",
+                "threads":   4,
+                "overwrite": "force",
+            },
         )
 
-        sse(q, "log", {"msg": "Fetching playlist/track info..."})
-        
-        # Download the tracks
-        # spotdl.download() returns a list of downloaded file paths
-        songs = downloader.search_and_download(
-            query=url,
-            use_spotify=True,
-        )
+        sse(q, "log", {"msg": "Fetching track info..."})
+        songs = spotdl.search([url])
+        if not songs:
+            raise RuntimeError("No tracks found for that Spotify URL.")
 
-        # Give some feedback
-        if isinstance(songs, list):
-            sse(q, "log", {"msg": f"📄 Downloaded {len(songs)} track(s)"})
-        else:
-            sse(q, "log", {"msg": "📄 Downloaded track"})
+        sse(q, "log", {"msg": f"📄 Downloading {len(songs)} track(s)…"})
+        results = spotdl.download_songs(songs)
 
-        # Collect the files that were created in the temp directory
-        files = list(tmpdir.glob("*.mp3"))
-        
+        # results is a list of (Song, Path|None) tuples
+        files = [path for _, path in results if path is not None]
         if not files:
             raise RuntimeError("spotdl produced no output files.")
 
+        sse(q, "log", {"msg": f"✓ Downloaded {len(files)} track(s)"})
         out_file, out_name = finalize_output(tmpdir, files)
-        job["file"] = out_file
+        job["file"]     = out_file
         job["filename"] = out_name
         sse(q, "done", {"job_id": job_id, "filename": out_name})
 
