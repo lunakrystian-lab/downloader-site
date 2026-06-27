@@ -286,10 +286,10 @@ def run_download_ytdlp(job_id, payload):
     q = job["queue"]
     tmpdir = job["tmpdir"]
     url = payload.get("url", "").strip()
-    fmt = payload.get("format", "best").strip()
+    fmt = payload.get("fmt", "best").strip()
     start = payload.get("start", "").strip()
     end = payload.get("end", "").strip()
-    custom_name = sanitize_filename(payload.get("filename", "").strip())
+    custom_name = sanitize_filename(payload.get("fname", "").strip())
 
     try:
         # Check for ffmpeg and other dependencies
@@ -299,7 +299,7 @@ def run_download_ytdlp(job_id, payload):
 
         # Build the output filename template
         if custom_name:
-            outtmpl = str(tmpdir / f"{custom_name}")
+            outtmpl = str(tmpdir / f"{custom_name}.%(ext)s")
         else:
             outtmpl = str(tmpdir / "%(title)s.%(ext)s")
 
