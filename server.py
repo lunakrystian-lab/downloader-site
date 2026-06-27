@@ -255,6 +255,9 @@ def run_download(job_id, payload):
             "no_cache_dir":        True,
             "outtmpl":             outtmpl,
             "format":              fmt,
+            # Prefer widely-available containers so format selection doesn't
+            # fail when a specific codec/container combination is absent.
+            "format_sort":         ["res", "ext:mp4:m4a:webm:ogg"],
             "progress_hooks":      [make_progress_hook(q)],
             "postprocessor_hooks": [make_postprocessor_hook(q)],
         }
@@ -302,7 +305,11 @@ def run_download(job_id, payload):
             info  = ydl.extract_info(url, download=False)
             title = info.get("title", "download")
             sse(q, "log", {"msg": f"📄 {title}"})
-            ydl.download([url])
+            # Re-use the already-fetched info dict for the actual download
+            # instead of calling ydl.download([url]), which makes a second
+            # round-trip and can get a different format list — the root cause
+            # of "Requested format is not available" errors.
+            ydl.process_ie_result(info, download=True)
 
         files = list(tmpdir.iterdir())
         if not files:
