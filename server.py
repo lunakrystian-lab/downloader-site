@@ -230,7 +230,11 @@ def run_download_spotdl(job_id, payload):
 
         sse(q, "log", {"msg": "Contacting Spotify..."})
 
-        cmd = [spotdl_bin, "--output", str(tmpdir), url]
+        cmd = [spotdl_bin, "--output", str(tmpdir)]
+        if COOKIES_PATH.exists():
+            cmd += ["--cookie-file", str(COOKIES_PATH)]
+            sse(q, "log", {"msg": "Using cookies"})
+        cmd += [url]
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
