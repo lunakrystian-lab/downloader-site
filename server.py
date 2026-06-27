@@ -14,6 +14,14 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 import yt_dlp
 
+# Try to import spotdl
+try:
+    from spotdl.downloader.downloader import Downloader
+    from spotdl.types.song import Song
+    SPOTDL_AVAILABLE = True
+except ImportError:
+    SPOTDL_AVAILABLE = False
+
 # ── Config ────────────────────────────────────────────────────────────────────
 BASE_DIR      = Path(__file__).resolve().parent
 PASSWORD      = os.environ.get("PASSWORD", "changeme")
@@ -203,50 +211,96 @@ def finalize_output(tmpdir, files):
         return files[0], files[0].name
     zip_path = tmpdir / "downloads.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in files:
-            zf.write(f, arcname=f.name)
-    return zip_path, f"{len(files)}_files.zip"
+        for file in files:
+            zf.write(file, arcname=file.name)
+    return zip_path, "downloads.zip"
 
-# ── Download worker ───────────────────────────────────────────────────────────
-def run_download(job_id, payload):
+def is_spotify_url(url: str) -> bool:
+    """Check if the URL is a Spotify link."""
+    return "spotify.com" in url
+
+# ── Download functions ────────────────────────────────────────────────────────
+
+def run_download_spotdl(job_id, payload):
+    """Download from Spotify using spotdl."""
     job = jobs[job_id]
-    q   = job["queue"]
-    url        = payload["url"]
-    fmt        = payload.get("fmt", "best")
-    fname      = sanitize_filename(payload.get("fname", ""))
-    start      = payload.get("start", "").strip()
-    end        = payload.get("end",   "").strip()
-    is_spot    = "spotify.com" in url
-    has_ffmpeg = shutil.which("ffmpeg") is not None
-
-    tmpdir = Path(tempfile.mkdtemp())
-    job["tmpdir"] = tmpdir
+    q = job["queue"]
+    tmpdir = job["tmpdir"]
+    url = payload.get("url", "").strip()
 
     try:
-        if is_spot:
-            sse(q, "log", {"msg": "Spotify download starting..."})
-            proc = subprocess.Popen(
-                [sys.executable, "-m", "spotdl", url, "--output", str(tmpdir)],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-            )
-            for line in proc.stdout:
-                line = line.rstrip()
-                if line:
-                    sse(q, "log", {"msg": line})
-            proc.wait()
-            if proc.returncode != 0:
-                raise RuntimeError("spotdl exited with an error.")
-            files = list(tmpdir.iterdir())
-            if not files:
-                raise RuntimeError("spotdl produced no files.")
-            out_file, out_name = finalize_output(tmpdir, files)
-            job["file"]     = out_file
-            job["filename"] = out_name
-            sse(q, "done", {"job_id": job_id, "filename": out_name})
-            return
+        if not SPOTDL_AVAILABLE:
+            raise RuntimeError("spotdl is not installed. Install it with: pip install spotdl")
 
-        # ── yt-dlp ──────────────────────────────────────────────────────────
-        outtmpl       = str(tmpdir / ("{}.%(ext)s".format(fname) if fname else "%(title)s.%(ext)s"))
+        sse(q, "log", {"msg": "Contacting Spotify..."})
+
+        # Create spotdl downloader instance
+        # Use the temp directory as output path
+        downloader = Downloader(
+            output=str(tmpdir),
+            format="mp3",
+        )
+
+        sse(q, "log", {"msg": "Fetching playlist/track info..."})
+        
+        # Download the tracks
+        # spotdl.download() returns a list of downloaded file paths
+        songs = downloader.search_and_download(
+            query=url,
+            use_spotify=True,
+        )
+
+        # Give some feedback
+        if isinstance(songs, list):
+            sse(q, "log", {"msg": f"📄 Downloaded {len(songs)} track(s)"})
+        else:
+            sse(q, "log", {"msg": "📄 Downloaded track"})
+
+        # Collect the files that were created in the temp directory
+        files = list(tmpdir.glob("*.mp3"))
+        
+        if not files:
+            raise RuntimeError("spotdl produced no output files.")
+
+        out_file, out_name = finalize_output(tmpdir, files)
+        job["file"] = out_file
+        job["filename"] = out_name
+        sse(q, "done", {"job_id": job_id, "filename": out_name})
+
+    except Exception as exc:
+        job["error"] = str(exc)
+        sse(q, "error", {"msg": "ERROR: {}".format(exc)})
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        job["tmpdir"] = None
+
+    finally:
+        q.put(None)
+
+
+def run_download_ytdlp(job_id, payload):
+    """Download from YouTube and other sources using yt-dlp."""
+    job = jobs[job_id]
+    q = job["queue"]
+    tmpdir = job["tmpdir"]
+    url = payload.get("url", "").strip()
+    fmt = payload.get("format", "best").strip()
+    start = payload.get("start", "").strip()
+    end = payload.get("end", "").strip()
+    custom_name = sanitize_filename(payload.get("filename", "").strip())
+
+    try:
+        # Check for ffmpeg and other dependencies
+        has_ffmpeg = shutil.which("ffmpeg") is not None
+        if not has_ffmpeg:
+            sse(q, "log", {"msg": "⚠ ffmpeg not found — some features disabled"})
+
+        # Build the output filename template
+        if custom_name:
+            outtmpl = str(tmpdir / f"{custom_name}")
+        else:
+            outtmpl = str(tmpdir / "%(title)s.%(ext)s")
+
+        # Determine if downloading audio only
         is_audio_only = fmt == "bestaudio/best"
 
         opts = {
@@ -328,6 +382,17 @@ def run_download(job_id, payload):
     finally:
         q.put(None)
 
+
+def run_download(job_id, payload):
+    """Route to the appropriate downloader (spotdl or yt-dlp)."""
+    url = payload.get("url", "").strip()
+    
+    if is_spotify_url(url):
+        run_download_spotdl(job_id, payload)
+    else:
+        run_download_ytdlp(job_id, payload)
+
+
 # ── Auth routes ───────────────────────────────────────────────────────────────
 @app.route("/login", methods=["GET"])
 def login_page():
@@ -385,10 +450,11 @@ def start():
     sweep_stale_jobs()
     payload = request.get_json(force=True)
     job_id  = str(uuid.uuid4())
+    tmpdir  = Path(tempfile.mkdtemp(prefix="downloader-"))
     with jobs_lock:
         jobs[job_id] = {
             "queue": queue.Queue(), "file": None, "filename": None,
-            "error": None, "tmpdir": None, "created": time.time(),
+            "error": None, "tmpdir": tmpdir, "created": time.time(),
         }
     threading.Thread(target=run_download, args=(job_id, payload), daemon=True).start()
     return jsonify({"job_id": job_id})
@@ -450,5 +516,6 @@ if __name__ == "__main__":
     print("  Open: http://localhost:{}".format(port))
     print("  Password: {}".format("SET" if os.environ.get("PASSWORD") else "NOT SET (default 'changeme' — set PASSWORD!)"))
     print("  Secure cookies: {}".format("on" if SECURE_COOKIES else "off (set SECURE_COOKIES=1 behind HTTPS)"))
+    print("  Spotify support: {}".format("✓ enabled" if SPOTDL_AVAILABLE else "✗ spotdl not installed"))
     print("=" * 50)
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
