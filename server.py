@@ -1,52 +1,77 @@
 #!/usr/bin/env python3
 """
 Multi-Downloader — Web Server
-Env vars: PASSWORD, SECRET_KEY
+Env vars: PASSWORD, SECRET_KEY, SECURE_COOKIES, COOKIES_PATH
 """
 
-import os, sys, json, queue, threading, subprocess, shutil, tempfile, mimetypes, time
+import os, sys, json, queue, threading, subprocess, shutil, tempfile, mimetypes, time, re, zipfile, uuid
 from pathlib import Path
 from functools import wraps
 from urllib.parse import quote
 from flask import (Flask, request, Response, jsonify,
                    send_from_directory, session, redirect, url_for)
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.middleware.proxy_fix import ProxyFix
 import yt_dlp
 
 # ── Config ────────────────────────────────────────────────────────────────────
+BASE_DIR      = Path(__file__).resolve().parent
 PASSWORD      = os.environ.get("PASSWORD", "changeme")
 SECRET_KEY    = os.environ.get("SECRET_KEY", "dev-secret-change-in-production")
-COOKIES_PATH  = Path("/app/cookies.txt")
+# Cookies live next to the script by default so local runs (per README) just
+# work. Override with COOKIES_PATH if you deploy somewhere with a different
+# writable/persistent location (e.g. a mounted volume).
+COOKIES_PATH  = Path(os.environ.get("COOKIES_PATH", str(BASE_DIR / "cookies.txt")))
 PASSWORD_HASH = generate_password_hash(PASSWORD)
+# Secure cookies require HTTPS. Running locally over http://localhost (the
+# documented dev workflow) with this forced on can silently break login in
+# some browsers. Default off; set SECURE_COOKIES=1 when deployed behind HTTPS
+# (e.g. on Railway).
+SECURE_COOKIES = os.environ.get("SECURE_COOKIES", "0").lower() in ("1", "true", "yes")
+JOB_TTL_SECS   = 2 * 60 * 60  # abandon + clean up jobs nobody ever collected
 
 app = Flask(__name__, static_folder="static")
 app.secret_key = SECRET_KEY
 app.config.update(
-    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_SECURE=SECURE_COOKIES,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     PERMANENT_SESSION_LIFETIME=60 * 60 * 12,
 )
+# Trust exactly one reverse-proxy hop (Railway/Render/Heroku-style PaaS) for
+# client IP / scheme. Without this, request.remote_addr is the proxy's IP,
+# not the real client's — which breaks the brute-force lockout below (it'd
+# either lock out everyone behind the proxy at once, or never trigger).
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
 # ── Brute-force protection ────────────────────────────────────────────────────
 failed_attempts: dict = {}
+failed_attempts_lock = threading.Lock()
 MAX_ATTEMPTS  = 5
 LOCKOUT_SECS  = 60 * 15
 
 def is_locked_out(ip):
     now = time.time()
-    attempts = [t for t in failed_attempts.get(ip, []) if now - t < LOCKOUT_SECS]
-    failed_attempts[ip] = attempts
-    return len(attempts) >= MAX_ATTEMPTS
+    with failed_attempts_lock:
+        attempts = [t for t in failed_attempts.get(ip, []) if now - t < LOCKOUT_SECS]
+        failed_attempts[ip] = attempts
+        return len(attempts) >= MAX_ATTEMPTS
 
 def record_failure(ip):
-    failed_attempts.setdefault(ip, []).append(time.time())
+    with failed_attempts_lock:
+        failed_attempts.setdefault(ip, []).append(time.time())
+
+def attempts_remaining(ip):
+    with failed_attempts_lock:
+        return max(0, MAX_ATTEMPTS - len(failed_attempts.get(ip, [])))
 
 def clear_failures(ip):
-    failed_attempts.pop(ip, None)
+    with failed_attempts_lock:
+        failed_attempts.pop(ip, None)
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 def login_required(f):
+    """For HTML page routes: bounce an unauthenticated browser to /login."""
     @wraps(f)
     def decorated(*args, **kwargs):
         if not session.get("logged_in"):
@@ -54,8 +79,33 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated
 
+def api_login_required(f):
+    """For fetch/EventSource routes: a redirect-to-HTML response just shows up
+    as a confusing 'could not reach server' to the caller. Return a clean 401
+    so the frontend can detect it and send the user to /login itself."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("logged_in"):
+            return jsonify({"error": "not authenticated"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
 # ── Jobs ──────────────────────────────────────────────────────────────────────
 jobs: dict = {}
+jobs_lock = threading.Lock()
+
+def sweep_stale_jobs():
+    """Clean up temp dirs from jobs whose file was never collected via
+    /download/<id> (closed tab, crashed client, etc.) so disk usage doesn't
+    grow unbounded on a long-running server."""
+    now = time.time()
+    with jobs_lock:
+        stale = [jid for jid, j in jobs.items() if now - j.get("created", now) > JOB_TTL_SECS]
+        for jid in stale:
+            tmpdir = jobs[jid].get("tmpdir")
+            if tmpdir:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+            jobs.pop(jid, None)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def sse(q, event, data):
@@ -75,25 +125,87 @@ def parse_time(value):
     if len(parts) == 3: return parts[0] * 3600 + parts[1] * 60 + parts[2]
     return 0.0
 
+def sanitize_filename(name: str, max_len: int = 150) -> str:
+    """Keep a user-supplied custom filename from escaping the job's temp dir.
+    Without this, a name like '../../../whatever' is interpolated straight
+    into yt-dlp's output template, which yt-dlp will happily honor — letting
+    a logged-in user write files outside the sandboxed temp directory."""
+    name = (name or "").strip()
+    if not name:
+        return ""
+    name = name.replace("/", "_").replace("\\", "_")
+    name = name.replace("..", "_")
+    name = re.sub(r"[\x00-\x1f\x7f]", "", name)
+    name = name.strip(" .")
+    return name[:max_len]
+
+def human_size(n):
+    if not n:
+        return "?"
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}TB"
+
+def human_eta(seconds):
+    if seconds is None:
+        return "?"
+    seconds = int(seconds)
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
 def make_progress_hook(q):
     def hook(d):
         status = d.get("status")
         if status == "downloading":
+            # NOTE: deliberately computed from the numeric fields rather than
+            # yt-dlp's _percent_str / _speed_str / _eta_str. Those "pretty"
+            # strings can carry embedded ANSI color codes depending on
+            # context, which breaks parseFloat() on the frontend and can
+            # leave the progress bar stuck. The numeric fields are stable.
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            done  = d.get("downloaded_bytes", 0)
+            pct   = (done / total * 100) if total else 0
             sse(q, "progress", {
-                "pct":   d.get("_percent_str", "").strip(),
-                "speed": d.get("_speed_str",   "").strip(),
-                "eta":   d.get("_eta_str",     "").strip(),
+                "pct":   f"{pct:.1f}%",
+                "speed": (human_size(d.get("speed")) + "/s") if d.get("speed") else "",
+                "eta":   human_eta(d.get("eta")),
             })
         elif status == "finished":
             sse(q, "progress", {"pct": "100%", "speed": "", "eta": "finishing..."})
     return hook
 
+def make_postprocessor_hook(q):
+    def hook(d):
+        if d.get("status") == "started":
+            pp = d.get("postprocessor", "")
+            sse(q, "log", {"msg": f"Post-processing ({pp})…"})
+    return hook
+
 def safe_disposition(filename):
     ascii_name = filename.encode("ascii", "ignore").decode("ascii").strip()
+    # A literal quote or newline in the fallback name would break the header.
+    ascii_name = ascii_name.replace('"', "'").replace("\r", "").replace("\n", "")
     if not ascii_name:
         ascii_name = "download"
     encoded = quote(filename, safe="")
     return "attachment; filename=\"{}\"; filename*=UTF-8''{}".format(ascii_name, encoded)
+
+def finalize_output(tmpdir, files):
+    """Return (path, display_name) for whatever the job produced. If more
+    than one file came out (e.g. a Spotify album/playlist downloads many
+    tracks), zip them together instead of silently handing back only
+    files[0] and discarding the rest."""
+    if len(files) == 1:
+        return files[0], files[0].name
+    zip_path = tmpdir / "downloads.zip"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in files:
+            zf.write(f, arcname=f.name)
+    return zip_path, f"{len(files)}_files.zip"
 
 # ── Download worker ───────────────────────────────────────────────────────────
 def run_download(job_id, payload):
@@ -101,13 +213,14 @@ def run_download(job_id, payload):
     q   = job["queue"]
     url        = payload["url"]
     fmt        = payload.get("fmt", "best")
-    fname      = payload.get("fname", "").strip()
+    fname      = sanitize_filename(payload.get("fname", ""))
     start      = payload.get("start", "").strip()
     end        = payload.get("end",   "").strip()
     is_spot    = "spotify.com" in url
     has_ffmpeg = shutil.which("ffmpeg") is not None
 
     tmpdir = Path(tempfile.mkdtemp())
+    job["tmpdir"] = tmpdir
 
     try:
         if is_spot:
@@ -126,10 +239,10 @@ def run_download(job_id, payload):
             files = list(tmpdir.iterdir())
             if not files:
                 raise RuntimeError("spotdl produced no files.")
-            out_file = files[0]
+            out_file, out_name = finalize_output(tmpdir, files)
             job["file"]     = out_file
-            job["filename"] = out_file.name
-            sse(q, "done", {"job_id": job_id, "filename": out_file.name})
+            job["filename"] = out_name
+            sse(q, "done", {"job_id": job_id, "filename": out_name})
             return
 
         # ── yt-dlp ──────────────────────────────────────────────────────────
@@ -137,19 +250,20 @@ def run_download(job_id, payload):
         is_audio_only = fmt == "bestaudio/best"
 
         opts = {
-            "quiet":          False,
-            "no_warnings":    False,
-            "no_cache_dir":   True,
-            "outtmpl":        outtmpl,
-            "format":         fmt,
-            "progress_hooks": [make_progress_hook(q)],
+            "quiet":               True,
+            "no_warnings":         True,
+            "no_cache_dir":        True,
+            "outtmpl":             outtmpl,
+            "format":              fmt,
+            "progress_hooks":      [make_progress_hook(q)],
+            "postprocessor_hooks": [make_postprocessor_hook(q)],
         }
 
         if COOKIES_PATH.exists():
             opts["cookiefile"] = str(COOKIES_PATH)
             sse(q, "log", {"msg": "Using cookies"})
         else:
-            sse(q, "log", {"msg": "No cookies — may hit bot detection"})
+            sse(q, "log", {"msg": "⚠ No cookies — may hit bot detection"})
 
         if is_audio_only:
             if has_ffmpeg:
@@ -159,14 +273,14 @@ def run_download(job_id, payload):
                     "preferredquality": "192",
                 }]
             else:
-                sse(q, "log", {"msg": "ffmpeg not found — audio will be in original format"})
+                sse(q, "log", {"msg": "⚠ ffmpeg not found — audio will be in original format"})
                 opts["format"] = "bestaudio"
 
         if "+" in fmt:
             if has_ffmpeg:
                 opts["merge_output_format"] = "mp4"
             else:
-                sse(q, "log", {"msg": "ffmpeg not found — falling back to pre-merged stream"})
+                sse(q, "log", {"msg": "⚠ ffmpeg not found — falling back to pre-merged stream"})
                 opts["format"] = "best"
 
         if (start or end) and has_ffmpeg:
@@ -180,28 +294,29 @@ def run_download(job_id, payload):
             opts["download_ranges"]         = _ranges
             opts["force_keyframes_at_cuts"] = True
         elif (start or end) and not has_ffmpeg:
-            sse(q, "log", {"msg": "Time trimming skipped — ffmpeg required"})
+            sse(q, "log", {"msg": "⚠ Time trimming skipped — ffmpeg required"})
 
         sse(q, "log", {"msg": "Contacting servers..."})
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.cache.remove()
             info  = ydl.extract_info(url, download=False)
             title = info.get("title", "download")
-            sse(q, "log", {"msg": title})
+            sse(q, "log", {"msg": f"📄 {title}"})
             ydl.download([url])
 
         files = list(tmpdir.iterdir())
         if not files:
             raise RuntimeError("yt-dlp produced no output file.")
-        out_file = files[0]
+        out_file, out_name = finalize_output(tmpdir, files)
         job["file"]     = out_file
-        job["filename"] = out_file.name
-        sse(q, "done", {"job_id": job_id, "filename": out_file.name})
+        job["filename"] = out_name
+        sse(q, "done", {"job_id": job_id, "filename": out_name})
 
     except Exception as exc:
         job["error"] = str(exc)
         sse(q, "error", {"msg": "ERROR: {}".format(exc)})
         shutil.rmtree(tmpdir, ignore_errors=True)
+        job["tmpdir"] = None
 
     finally:
         q.put(None)
@@ -228,8 +343,7 @@ def login():
         return jsonify({"ok": True})
     else:
         record_failure(ip)
-        remaining = MAX_ATTEMPTS - len(failed_attempts.get(ip, []))
-        return jsonify({"error": "Wrong password. {} attempts left.".format(remaining)}), 401
+        return jsonify({"error": "Wrong password. {} attempts left.".format(attempts_remaining(ip))}), 401
 
 @app.route("/logout")
 def logout():
@@ -238,7 +352,7 @@ def logout():
 
 # ── Cookie upload ─────────────────────────────────────────────────────────────
 @app.route("/upload-cookies", methods=["POST"])
-@login_required
+@api_login_required
 def upload_cookies():
     f = request.files.get("cookies")
     if not f:
@@ -248,7 +362,7 @@ def upload_cookies():
     return jsonify({"ok": True, "msg": "Cookies uploaded successfully!"})
 
 @app.route("/cookies-status")
-@login_required
+@api_login_required
 def cookies_status():
     return jsonify({"exists": COOKIES_PATH.exists()})
 
@@ -259,17 +373,21 @@ def index():
     return send_from_directory("static", "index.html")
 
 @app.route("/start", methods=["POST"])
-@login_required
+@api_login_required
 def start():
-    import uuid
+    sweep_stale_jobs()
     payload = request.get_json(force=True)
     job_id  = str(uuid.uuid4())
-    jobs[job_id] = {"queue": queue.Queue(), "file": None, "filename": None, "error": None}
+    with jobs_lock:
+        jobs[job_id] = {
+            "queue": queue.Queue(), "file": None, "filename": None,
+            "error": None, "tmpdir": None, "created": time.time(),
+        }
     threading.Thread(target=run_download, args=(job_id, payload), daemon=True).start()
     return jsonify({"job_id": job_id})
 
 @app.route("/stream/<job_id>")
-@login_required
+@api_login_required
 def stream(job_id):
     job = jobs.get(job_id)
     if not job:
@@ -285,13 +403,14 @@ def stream(job_id):
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 @app.route("/download/<job_id>")
-@login_required
+@api_login_required
 def download(job_id):
     job = jobs.get(job_id)
     if not job or not job["file"]:
         return Response("File not ready", status=404)
     filepath = job["file"]
     filename = job["filename"]
+    tmpdir   = job.get("tmpdir")
     mime     = mimetypes.guess_type(filename)[0] or "application/octet-stream"
     def stream_and_cleanup():
         try:
@@ -302,12 +421,12 @@ def download(job_id):
                         break
                     yield chunk
         finally:
-            try:
-                filepath.unlink(missing_ok=True)
-                filepath.parent.rmdir()
-            except Exception:
-                pass
-            jobs.pop(job_id, None)
+            # Remove the whole job temp dir (covers both the single-file case
+            # and the zipped multi-file case) rather than just the one file.
+            if tmpdir:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+            with jobs_lock:
+                jobs.pop(job_id, None)
     return Response(
         stream_and_cleanup(),
         mimetype=mime,
@@ -322,6 +441,7 @@ if __name__ == "__main__":
     print("=" * 50)
     print("  Multi-Downloader")
     print("  Open: http://localhost:{}".format(port))
-    print("  Password: {}".format("SET" if os.environ.get("PASSWORD") else "NOT SET"))
+    print("  Password: {}".format("SET" if os.environ.get("PASSWORD") else "NOT SET (default 'changeme' — set PASSWORD!)"))
+    print("  Secure cookies: {}".format("on" if SECURE_COOKIES else "off (set SECURE_COOKIES=1 behind HTTPS)"))
     print("=" * 50)
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

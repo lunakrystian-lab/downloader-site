@@ -1,4 +1,6 @@
-flask
-werkzeug
-yt-dlp
-spotdl
+flask>=3.0
+werkzeug>=3.0
+# Minimum pinned at the release where yt-dlp switched YouTube extraction to
+# require an external JS runtime (Deno) — see README for why that matters.
+yt-dlp>=2025.11.12
+spotdl>=4.4.0
