@@ -14,16 +14,8 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 import yt_dlp
 
-# Try to import spotdl
-try:
-    from spotdl import Spotdl
-    SPOTDL_AVAILABLE = True
-except ImportError:
-    SPOTDL_AVAILABLE = False
-
-# Default Spotify API credentials bundled with spotdl (same ones the CLI uses)
-SPOTDL_CLIENT_ID     = "5f573c9620494bae87890c0f08a60293"
-SPOTDL_CLIENT_SECRET = "212476d9b0f3472eaa762d90b19b0ba8"
+# Check if spotdl CLI is available
+SPOTDL_AVAILABLE = shutil.which("spotdl") is not None
 
 # ── Config ────────────────────────────────────────────────────────────────────
 BASE_DIR      = Path(__file__).resolve().parent
@@ -225,42 +217,44 @@ def is_spotify_url(url: str) -> bool:
 # ── Download functions ────────────────────────────────────────────────────────
 
 def run_download_spotdl(job_id, payload):
-    """Download from Spotify using spotdl."""
+    """Download from Spotify using spotdl CLI."""
     job = jobs[job_id]
     q   = job["queue"]
     tmpdir = job["tmpdir"]
     url = payload.get("url", "").strip()
 
     try:
-        if not SPOTDL_AVAILABLE:
+        spotdl_bin = shutil.which("spotdl")
+        if not spotdl_bin:
             raise RuntimeError("spotdl is not installed. Run: pip install spotdl")
 
         sse(q, "log", {"msg": "Contacting Spotify..."})
 
-        spotdl = Spotdl(
-            client_id=SPOTDL_CLIENT_ID,
-            client_secret=SPOTDL_CLIENT_SECRET,
-            headless=True,
-            no_cache=True,
-            downloader_settings={
-                "output":    str(tmpdir),
-                "format":    "mp3",
-                "log_level": "ERROR",
-                "threads":   4,
-                "overwrite": "force",
-            },
+        cmd = [
+            spotdl_bin, url,
+            "--output", str(tmpdir),
+            "--format", "mp3",
+            "--log-level", "ERROR",
+            "--overwrite", "force",
+        ]
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
         )
 
-        sse(q, "log", {"msg": "Fetching track info..."})
-        songs = spotdl.search([url])
-        if not songs:
-            raise RuntimeError("No tracks found for that Spotify URL.")
+        for line in proc.stdout:
+            line = line.strip()
+            if line:
+                sse(q, "log", {"msg": line})
 
-        sse(q, "log", {"msg": f"📄 Downloading {len(songs)} track(s)…"})
-        results = spotdl.download_songs(songs)
+        proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError(f"spotdl exited with code {proc.returncode}")
 
-        # results is a list of (Song, Path|None) tuples
-        files = [path for _, path in results if path is not None]
+        files = list(tmpdir.iterdir())
         if not files:
             raise RuntimeError("spotdl produced no output files.")
 
