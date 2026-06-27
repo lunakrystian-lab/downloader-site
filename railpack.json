@@ -1,5 +1,6 @@
 {
-  "apt": {
-    "packages": ["ffmpeg"]
+  "packages": {
+    "deno": "latest",
+    "ffmpeg": "latest"
   }
 }
