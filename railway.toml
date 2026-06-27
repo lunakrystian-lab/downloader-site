@@ -1,0 +1,9 @@
+[build]
+builder = "nixpacks"
+
+[build.nixpacksPlan.phases.setup]
+nixPkgs = ["ffmpeg"]
+
+[deploy]
+startCommand = "python server.py"
+restartPolicyType = "on_failure"
